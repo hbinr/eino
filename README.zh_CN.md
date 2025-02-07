@@ -45,10 +45,10 @@ message, _ := model.Generate(ctx, []*Message{
 
 Eino 提供了两组用于编排的 API：
 
-| API      | 特性和使用场景                     |
-| -------- |-----------------------------|
-| Chain    | 简单的链式有向图，只能向前推进。            |
-| Graph    | 循环或非循环有向图。功能强大且灵活。          |
+| API   | 特性和使用场景                       |
+| ----- | ------------------------------------ |
+| Chain | 简单的链式有向图，只能向前推进。     |
+| Graph | 循环或非循环有向图。功能强大且灵活。 |
 
 我们来创建一个简单的 chain: 一个模版（ChatTemplate）接一个大模型（ChatModel）。
 
@@ -161,12 +161,12 @@ compiledGraph.Invoke(ctx, input, WithCallbacks(handler).DesignateNode("node_1"))
 - 借助上述流式处理能力，组件本身的流式处理范式变的对用户透明。
 - 经过编译的 Graph 可以用 4 种不同的流式范式来运行：
 
-| 流处理范式     | 解释                                               |
-|-----------|-----------------------------------------------|
-| Invoke    | 接收非流类型 I ，返回非流类型 O                            |
-| Stream    | 接收非流类型 I ， 返回流类型 StreamReader[O]              |
-| Collect   | 接收流类型 StreamReader[I] ， 返回非流类型 O              |
-| Transform | 接收流类型 StreamReader[I] ， 返回流类型 StreamReader[O] |
+| 流处理范式 | 解释                                                     |
+| ---------- | -------------------------------------------------------- |
+| Invoke     | 接收非流类型 I ，返回非流类型 O                          |
+| Stream     | 接收非流类型 I ， 返回流类型 StreamReader[O]             |
+| Collect    | 接收流类型 StreamReader[I] ， 返回非流类型 O             |
+| Transform  | 接收流类型 StreamReader[I] ， 返回流类型 StreamReader[O] |
 
 ## 易扩展的切面（Callbacks）
 

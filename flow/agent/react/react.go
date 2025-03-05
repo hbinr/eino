@@ -18,7 +18,6 @@ package react
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/compose"
@@ -70,6 +69,7 @@ type AgentConfig struct {
 	// Note: The handler MUST close the modelOutput stream before returning
 	// Optional. By default, it checks if the first chunk contains tool calls.
 	// Note: The default implementation does not work well with Claude, which typically outputs tool calls after text content.
+	// Note: If your ChatModel doesn't output tool calls first, you can try adding prompts to constrain the model from generating extra text during the tool call.
 	StreamToolCallChecker func(ctx context.Context, modelOutput *schema.StreamReader[*schema.Message]) (bool, error)
 }
 
@@ -124,7 +124,9 @@ func firstChunkStreamToolCallChecker(_ context.Context, sr *schema.StreamReader[
 //	if err != nil {...}
 //	println(msg.Content)
 type Agent struct {
-	runnable compose.Runnable[[]*schema.Message, *schema.Message]
+	runnable         compose.Runnable[[]*schema.Message, *schema.Message]
+	graph            *compose.Graph[[]*schema.Message, *schema.Message]
+	graphAddNodeOpts []compose.GraphAddNodeOpt
 }
 
 // NewAgent creates a ReAct agent that feeds tool response into next round of Chat Model generation.
@@ -169,7 +171,7 @@ func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 	modelPreHandle := func(ctx context.Context, input []*schema.Message, state *state) ([]*schema.Message, error) {
 		state.Messages = append(state.Messages, input...)
 
-		modifiedInput := make([]*schema.Message, 0, len(state.Messages))
+		modifiedInput := make([]*schema.Message, len(state.Messages))
 		copy(modifiedInput, state.Messages)
 		return messageModifier(ctx, modifiedInput), nil
 	}
@@ -211,28 +213,39 @@ func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 		return nil, err
 	}
 
-	runnable, err := graph.Compile(ctx, compose.WithMaxRunSteps(config.MaxStep))
+	compileOpts := []compose.GraphCompileOption{compose.WithMaxRunSteps(config.MaxStep), compose.WithNodeTriggerMode(compose.AnyPredecessor)}
+	runnable, err := graph.Compile(ctx, compileOpts...)
 	if err != nil {
 		return nil, err
 	}
 
-	return &Agent{runnable: runnable}, nil
+	return &Agent{
+		runnable:         runnable,
+		graph:            graph,
+		graphAddNodeOpts: []compose.GraphAddNodeOpt{compose.WithGraphCompileOptions(compileOpts...)},
+	}, nil
 }
 
 func buildReturnDirectly(graph *compose.Graph[[]*schema.Message, *schema.Message]) (err error) {
 	directReturn := func(ctx context.Context, msgs *schema.StreamReader[[]*schema.Message]) (*schema.StreamReader[*schema.Message], error) {
 		return schema.StreamReaderWithConvert(msgs, func(msgs []*schema.Message) (*schema.Message, error) {
-			state, err := compose.GetState[*state](ctx)
-			if err != nil {
-				return nil, fmt.Errorf("get state failed: %w", err)
-			}
-			for i := range msgs {
-				msg := msgs[i]
-				if msg != nil && msg.ToolCallID == state.ReturnDirectlyToolCallID {
-					return msg, nil
+			var msg *schema.Message
+			err = compose.ProcessState[*state](ctx, func(_ context.Context, state *state) error {
+				for i := range msgs {
+					if msgs[i] != nil && msgs[i].ToolCallID == state.ReturnDirectlyToolCallID {
+						msg = msgs[i]
+						return nil
+					}
 				}
+				return nil
+			})
+			if err != nil {
+				return nil, err
 			}
-			return nil, schema.ErrNoValue
+			if msg == nil {
+				return nil, schema.ErrNoValue
+			}
+			return msg, nil
 		}), nil
 	}
 
@@ -245,16 +258,18 @@ func buildReturnDirectly(graph *compose.Graph[[]*schema.Message, *schema.Message
 	err = graph.AddBranch(nodeKeyTools, compose.NewStreamGraphBranch(func(ctx context.Context, msgsStream *schema.StreamReader[[]*schema.Message]) (endNode string, err error) {
 		msgsStream.Close()
 
-		s, err := compose.GetState[*state](ctx) // last msg stored in state should contain the tool call information
+		err = compose.ProcessState[*state](ctx, func(_ context.Context, state *state) error {
+			if len(state.ReturnDirectlyToolCallID) > 0 {
+				endNode = nodeKeyDirectReturn
+			} else {
+				endNode = nodeKeyModel
+			}
+			return nil
+		})
 		if err != nil {
-			return "", fmt.Errorf("get state in branch failed: %w", err)
+			return "", err
 		}
-
-		if len(s.ReturnDirectlyToolCallID) > 0 {
-			return nodeKeyDirectReturn, nil
-		}
-
-		return nodeKeyModel, nil
+		return endNode, nil
 	}, map[string]bool{nodeKeyModel: true, nodeKeyDirectReturn: true}))
 	if err != nil {
 		return err
@@ -310,4 +325,9 @@ func (r *Agent) Stream(ctx context.Context, input []*schema.Message, opts ...age
 	}
 
 	return res, nil
+}
+
+// ExportGraph exports the underlying graph from Agent, along with the []compose.GraphAddNodeOpt to be used when adding this graph to another graph.
+func (r *Agent) ExportGraph() (compose.AnyGraph, []compose.GraphAddNodeOpt) {
+	return r.graph, r.graphAddNodeOpts
 }

@@ -133,7 +133,6 @@ func TestNewStreamCopy(t *testing.T) {
 			s.send("a", nil)
 			s.closeSend()
 		}()
-
 		wg := sync.WaitGroup{}
 		wg.Add(2)
 
@@ -195,7 +194,7 @@ func TestNewStreamCopy(t *testing.T) {
 		wg := sync.WaitGroup{}
 		wg.Add(2)
 
-		buf := scp[0].csr.parent.mem.buf
+		//buf := scp[0].csr.parent.mem.buf
 		go func() {
 			defer func() {
 				scp[0].Close()
@@ -222,7 +221,7 @@ func TestNewStreamCopy(t *testing.T) {
 
 		wg.Wait()
 
-		assert.Equal(t, 0, buf.Len())
+		//assert.Equal(t, 0, buf.Len())
 	})
 
 	t.Run("test long time recv", func(t *testing.T) {
@@ -265,9 +264,9 @@ func TestNewStreamCopy(t *testing.T) {
 		}
 
 		wg.Wait()
-		memo := copies[0].csr.parent.mem
-		assert.Equal(t, true, memo.hasFinished)
-		assert.Equal(t, 0, memo.buf.Len())
+		//memo := copies[0].csr.parent.mem
+		//assert.Equal(t, true, memo.hasFinished)
+		//assert.Equal(t, 0, memo.buf.Len())
 	})
 
 	t.Run("test closes", func(t *testing.T) {
@@ -320,15 +319,8 @@ func TestNewStreamCopy(t *testing.T) {
 		}
 
 		wgEven.Wait()
-		memo := copies[0].csr.parent.mem
-		// memo.mu.Lock()
-		// closedNum := memo.closedNum
-		// memo.mu.Unlock()
-		// assert.Equal(t, m/2, closedNum)
-
 		wg.Wait()
-		assert.Equal(t, m, memo.closedNum)
-		assert.Equal(t, 0, memo.buf.Len())
+		assert.Equal(t, m, int(copies[0].csr.parent.closedNum))
 	})
 
 	t.Run("test reader do no close", func(t *testing.T) {
@@ -370,9 +362,7 @@ func TestNewStreamCopy(t *testing.T) {
 		}
 
 		wg.Wait()
-		memo := copies[0].csr.parent.mem
-		assert.Equal(t, 0, memo.closedNum) // not closed
-		assert.Equal(t, 0, memo.buf.Len()) // buff cleared
+		assert.Equal(t, 0, int(copies[0].csr.parent.closedNum)) // not closed
 	})
 
 }

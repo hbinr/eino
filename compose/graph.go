@@ -28,9 +28,9 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/prompt"
 	"github.com/cloudwego/eino/components/retriever"
+	"github.com/cloudwego/eino/internal/generic"
 	"github.com/cloudwego/eino/internal/gmap"
 	"github.com/cloudwego/eino/schema"
-	"github.com/cloudwego/eino/utils/generic"
 )
 
 // START is the start node of the graph. You can add your first edge with START.
@@ -156,6 +156,7 @@ type graph struct {
 		mappings []*FieldMapping
 	}
 
+	stateType      reflect.Type
 	stateGenerator func(ctx context.Context) any
 
 	expectedInputType, expectedOutputType reflect.Type
@@ -187,12 +188,14 @@ type newGraphConfig struct {
 	inputFieldMappingConverter, outputFieldMappingConverter             valueHandler
 	inputStreamFieldMappingConverter, outputStreamFieldMappingConverter streamHandler
 	cmp                                                                 component
+	stateType                                                           reflect.Type
 	stateGenerator                                                      func(ctx context.Context) any
 }
 
 func newGraphFromGeneric[I, O any](
 	cmp component,
 	stateGenerator func(ctx context.Context) any,
+	stateType reflect.Type,
 ) *graph {
 	return newGraph(&newGraphConfig{
 		inputType:                         generic.TypeOf[I](),
@@ -207,6 +210,7 @@ func newGraphFromGeneric[I, O any](
 		inputStreamFieldMappingConverter:  buildStreamFieldMappingConverter[I](),
 		outputStreamFieldMappingConverter: buildStreamFieldMappingConverter[O](),
 		cmp:                               cmp,
+		stateType:                         stateType,
 		stateGenerator:                    stateGenerator,
 	})
 }
@@ -247,6 +251,7 @@ func newGraph(cfg *newGraphConfig) *graph {
 
 		cmp: cfg.cmp,
 
+		stateType:        cfg.stateType,
 		stateGenerator:   cfg.stateGenerator,
 		handlerOnEdges:   make(map[string]map[string][]handlerPair),
 		handlerPreNode:   make(map[string][]handlerPair),
@@ -305,6 +310,34 @@ func (g *graph) addNode(key string, node *graphNode, options *graphAddNodeOpts) 
 		}
 	}
 	// end: check options
+
+	// check pre- / post-handler type
+	if options.processor != nil {
+		if options.processor.statePreHandler != nil {
+			// check state type
+			if g.stateType != options.processor.preStateType {
+				return fmt.Errorf("node[%s]'s pre handler state type[%v] is different from graph[%v]", key, options.processor.preStateType, g.stateType)
+			}
+			// check input type
+			if node.inputType() == nil && options.processor.statePreHandler.outputType != reflect.TypeOf((*any)(nil)).Elem() {
+				return fmt.Errorf("passthrough node[%s]'s pre handler type isn't any", key)
+			} else if node.inputType() != nil && node.inputType() != options.processor.statePreHandler.outputType {
+				return fmt.Errorf("node[%s]'s pre handler type[%v] is different from its input type[%v]", key, options.processor.statePreHandler.outputType, node.inputType())
+			}
+		}
+		if options.processor.statePostHandler != nil {
+			// check state type
+			if g.stateType != options.processor.postStateType {
+				return fmt.Errorf("node[%s]'s post handler state type[%v] is different from graph[%v]", key, options.processor.postStateType, g.stateType)
+			}
+			// check input type
+			if node.outputType() == nil && options.processor.statePostHandler.inputType != reflect.TypeOf((*any)(nil)).Elem() {
+				return fmt.Errorf("passthrough node[%s]'s post handler type isn't any", key)
+			} else if node.outputType() != nil && node.outputType() != options.processor.statePostHandler.inputType {
+				return fmt.Errorf("node[%s]'s post handler type[%v] is different from its output type[%v]", key, options.processor.statePostHandler.inputType, node.outputType())
+			}
+		}
+	}
 
 	g.nodes[key] = node
 
@@ -723,7 +756,7 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 	if isWorkflow(g.cmp) {
 		eager = true
 	}
-	if !eager && opt != nil && opt.getStateEnabled {
+	if !isWorkflow(g.cmp) && opt != nil && opt.getStateEnabled {
 		return nil, fmt.Errorf("shouldn't set WithGetStateEnable outside of the Workflow")
 	}
 	forbidGetState := true
@@ -743,11 +776,6 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 		if len(v) > 0 {
 			return nil, fmt.Errorf("some node's input or output types cannot be inferred: %v", g.toValidateMap)
 		}
-	}
-
-	// dag doesn't support branch
-	if runType == runTypeDAG && len(g.branches) > 0 {
-		return nil, fmt.Errorf("dag doesn't support branch for now")
 	}
 
 	for key := range g.fieldMappingRecords {
@@ -806,21 +834,23 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 
 		}
 	}
+	for start, branches := range g.branches {
+		for _, branch := range branches {
+			for end := range branch.endNodes {
+				if _, ok := invertedEdges[end]; !ok {
+					invertedEdges[end] = []string{start}
+				} else {
+					invertedEdges[end] = append(invertedEdges[end], start)
+				}
+			}
+		}
+	}
 
 	inputChannels := &chanCall{
 		writeTo:         g.edges[START],
 		writeToBranches: make([]*GraphBranch, len(g.branches[START])),
 	}
 	copy(inputChannels.writeToBranches, g.branches[START])
-
-	// validate dag
-	if runType == runTypeDAG {
-		for _, node := range g.startNodes {
-			if len(invertedEdges[node]) != 1 {
-				return nil, fmt.Errorf("dag start node[%s] should not have predecessor other than 'start', but got: %v", node, invertedEdges[node])
-			}
-		}
-	}
 
 	r := &runner{
 		invertedEdges:   invertedEdges,
@@ -842,6 +872,12 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 		edgeHandlerManager:      &edgeHandlerManager{h: g.handlerOnEdges},
 	}
 
+	successors := make(map[string][]string)
+	for ch := range r.chanSubscribeTo {
+		successors[ch] = getSuccessors(r.chanSubscribeTo[ch])
+	}
+	r.successors = successors
+
 	if g.stateGenerator != nil {
 		r.runCtx = func(ctx context.Context) context.Context {
 			return context.WithValue(ctx, stateKey{}, &internalState{
@@ -856,6 +892,7 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 		if err != nil {
 			return nil, err
 		}
+		r.dag = true
 	}
 
 	if opt != nil {
@@ -863,7 +900,9 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 	}
 
 	// default options
-	if r.options.maxRunSteps == 0 {
+	if r.dag && r.options.maxRunSteps > 0 {
+		return nil, fmt.Errorf("cannot set max run steps in dag mode")
+	} else if !r.dag && r.options.maxRunSteps == 0 {
 		r.options.maxRunSteps = len(r.chanSubscribeTo) + 10
 	}
 
@@ -872,6 +911,17 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 	g.onCompileFinish(ctx, opt, key2SubGraphs)
 
 	return r.toComposableRunnable(), nil
+}
+
+func getSuccessors(c *chanCall) []string {
+	ret := make([]string, len(c.writeTo))
+	copy(ret, c.writeTo)
+	for _, branch := range c.writeToBranches {
+		for node := range branch.endNodes {
+			ret = append(ret, node)
+		}
+	}
+	return ret
 }
 
 type subGraphCompileCallback struct {
@@ -1048,6 +1098,14 @@ func validateDAG(chanSubscribeTo map[string]*chanCall, invertedEdges map[string]
 						continue
 					}
 					m[subNode]--
+				}
+				for _, subBranch := range chanSubscribeTo[node].writeToBranches {
+					for subNode := range subBranch.endNodes {
+						if subNode == END {
+							continue
+						}
+						m[subNode]--
+					}
 				}
 				m[node] = -1
 			}

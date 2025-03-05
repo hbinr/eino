@@ -1397,3 +1397,307 @@ func TestContextCancel(t *testing.T) {
 		t.Fatal("graph have not returned canceled error")
 	}
 }
+
+func TestDAGStart(t *testing.T) {
+	g := NewGraph[map[string]any, map[string]any]()
+	err := g.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input map[string]any) (output map[string]any, err error) {
+		return map[string]any{"1": "1"}, nil
+	}))
+	assert.NoError(t, err)
+	err = g.AddLambdaNode("2", InvokableLambda(func(ctx context.Context, input map[string]any) (output map[string]any, err error) {
+		return input, nil
+	}))
+	assert.NoError(t, err)
+	err = g.AddEdge(START, "1")
+	assert.NoError(t, err)
+	err = g.AddEdge("1", "2")
+	assert.NoError(t, err)
+	err = g.AddEdge(START, "2")
+	assert.NoError(t, err)
+	err = g.AddEdge("2", END)
+	assert.NoError(t, err)
+	r, err := g.Compile(context.Background(), WithNodeTriggerMode(AllPredecessor))
+	assert.NoError(t, err)
+	result, err := r.Invoke(context.Background(), map[string]any{"start": "start"})
+	assert.NoError(t, err)
+	assert.Equal(t, map[string]any{"start": "start", "1": "1"}, result)
+}
+
+func concatLambda(s string) *Lambda {
+	return InvokableLambda(func(ctx context.Context, input string) (output string, err error) { return input + s, nil })
+}
+func mapLambda(k, v string) *Lambda {
+	return InvokableLambda(func(ctx context.Context, input map[string]string) (output map[string]string, err error) {
+		return map[string]string{
+			k: v,
+		}, nil
+	})
+}
+
+func TestBaseDAGBranch(t *testing.T) {
+	g := NewGraph[string, string]()
+
+	err := g.AddLambdaNode("1", concatLambda("1"))
+	assert.NoError(t, err)
+	err = g.AddLambdaNode("2", concatLambda("2"))
+	assert.NoError(t, err)
+	err = g.AddBranch(START, NewGraphBranch(func(ctx context.Context, in string) (endNode string, err error) {
+		if len(in) > 3 {
+			return "2", nil
+		}
+		return "1", nil
+	}, map[string]bool{"1": true, "2": true}))
+	assert.NoError(t, err)
+	err = g.AddEdge("1", END)
+	assert.NoError(t, err)
+	err = g.AddEdge("2", END)
+	assert.NoError(t, err)
+
+	ctx := context.Background()
+	r, err := g.Compile(ctx, WithNodeTriggerMode(AllPredecessor))
+	assert.NoError(t, err)
+	result, err := r.Invoke(ctx, "hi")
+	assert.NoError(t, err)
+	assert.Equal(t, "hi1", result)
+}
+
+func TestMultiDAGBranch(t *testing.T) {
+	g := NewGraph[map[string]string, map[string]string]()
+
+	err := g.AddLambdaNode("1", mapLambda("1", "1"))
+	assert.NoError(t, err)
+	err = g.AddLambdaNode("2", mapLambda("2", "2"))
+	assert.NoError(t, err)
+	err = g.AddLambdaNode("3", mapLambda("3", "3"))
+	assert.NoError(t, err)
+	err = g.AddLambdaNode("4", mapLambda("4", "4"))
+	assert.NoError(t, err)
+	err = g.AddBranch(START, NewGraphBranch(func(ctx context.Context, in map[string]string) (endNode string, err error) {
+		if len(in["input"]) > 3 {
+			return "2", nil
+		}
+		return "1", nil
+	}, map[string]bool{"1": true, "2": true}))
+	err = g.AddBranch(START, NewGraphBranch(func(ctx context.Context, in map[string]string) (endNode string, err error) {
+		if len(in["input"]) > 3 {
+			return "4", nil
+		}
+		return "3", nil
+	}, map[string]bool{"3": true, "4": true}))
+	assert.NoError(t, err)
+
+	err = g.AddEdge("1", END)
+	assert.NoError(t, err)
+	err = g.AddEdge("2", END)
+	assert.NoError(t, err)
+	err = g.AddEdge("3", END)
+	assert.NoError(t, err)
+	err = g.AddEdge("4", END)
+	assert.NoError(t, err)
+
+	ctx := context.Background()
+	r, err := g.Compile(ctx, WithNodeTriggerMode(AllPredecessor))
+	assert.NoError(t, err)
+	result, err := r.Invoke(ctx, map[string]string{"input": "hi"})
+	assert.NoError(t, err)
+	assert.Equal(t, map[string]string{
+		"1": "1",
+		"3": "3",
+	}, result)
+}
+
+func TestCrossDAGBranch(t *testing.T) {
+	g := NewGraph[map[string]string, map[string]string]()
+
+	err := g.AddLambdaNode("1", mapLambda("1", "1"))
+	assert.NoError(t, err)
+	err = g.AddLambdaNode("2", mapLambda("2", "2"))
+	assert.NoError(t, err)
+	err = g.AddLambdaNode("3", mapLambda("3", "3"))
+	assert.NoError(t, err)
+	err = g.AddBranch(START, NewGraphBranch(func(ctx context.Context, in map[string]string) (endNode string, err error) {
+		if len(in["input"]) > 3 {
+			return "2", nil
+		}
+		return "1", nil
+	}, map[string]bool{"1": true, "2": true}))
+	err = g.AddBranch(START, NewGraphBranch(func(ctx context.Context, in map[string]string) (endNode string, err error) {
+		if len(in["input"]) > 3 {
+			return "3", nil
+		}
+		return "2", nil
+	}, map[string]bool{"2": true, "3": true}))
+	assert.NoError(t, err)
+
+	err = g.AddEdge("1", END)
+	assert.NoError(t, err)
+	err = g.AddEdge("2", END)
+	assert.NoError(t, err)
+	err = g.AddEdge("3", END)
+	assert.NoError(t, err)
+
+	ctx := context.Background()
+	r, err := g.Compile(ctx, WithNodeTriggerMode(AllPredecessor))
+	assert.NoError(t, err)
+	result, err := r.Invoke(ctx, map[string]string{"input": "hi"})
+	assert.NoError(t, err)
+	assert.Equal(t, map[string]string{
+		"1": "1",
+		"2": "2",
+	}, result)
+}
+
+func TestNestedDAGBranch(t *testing.T) {
+	g := NewGraph[string, string]()
+
+	err := g.AddLambdaNode("1", concatLambda("1"))
+	assert.NoError(t, err)
+	err = g.AddLambdaNode("2", concatLambda("2"))
+	assert.NoError(t, err)
+	err = g.AddLambdaNode("3", concatLambda("3"))
+	assert.NoError(t, err)
+	err = g.AddLambdaNode("4", concatLambda("4"))
+	assert.NoError(t, err)
+	err = g.AddBranch(START, NewGraphBranch(func(ctx context.Context, in string) (endNode string, err error) {
+		if len(in) > 3 {
+			return "2", nil
+		}
+		return "1", nil
+	}, map[string]bool{"1": true, "2": true}))
+	err = g.AddBranch("2", NewGraphBranch(func(ctx context.Context, in string) (endNode string, err error) {
+		if len(in) > 10 {
+			return "4", nil
+		}
+		return "3", nil
+	}, map[string]bool{"3": true, "4": true}))
+	assert.NoError(t, err)
+	err = g.AddEdge("1", END)
+	assert.NoError(t, err)
+	err = g.AddEdge("3", END)
+	assert.NoError(t, err)
+	err = g.AddEdge("4", END)
+	assert.NoError(t, err)
+
+	ctx := context.Background()
+	r, err := g.Compile(ctx, WithNodeTriggerMode(AllPredecessor))
+	assert.NoError(t, err)
+	result, err := r.Invoke(ctx, "hello")
+	assert.NoError(t, err)
+	assert.Equal(t, "hello23", result)
+	result, err = r.Invoke(ctx, "hi")
+	assert.NoError(t, err)
+	assert.Equal(t, "hi1", result)
+	result, err = r.Invoke(ctx, "hellohello")
+	assert.NoError(t, err)
+	assert.Equal(t, "hellohello24", result)
+}
+
+func TestHandlerTypeValidate(t *testing.T) {
+	g := NewGraph[string, string](WithGenLocalState(func(ctx context.Context) (state string) {
+		return ""
+	}))
+	// passthrough pre fail
+	err := g.AddPassthroughNode("1", WithStatePreHandler(func(ctx context.Context, in string, state string) (string, error) {
+		return "", nil
+	}))
+	assert.ErrorContains(t, err, "passthrough node[1]'s pre handler type isn't any")
+	g.buildError = nil
+	// passthrough pre fail with input key
+	err = g.AddPassthroughNode("1", WithStatePreHandler(func(ctx context.Context, in string, state string) (string, error) {
+		return "", nil
+	}), WithInputKey("input"))
+	assert.ErrorContains(t, err, "node[1]'s pre handler type[string] is different from its input type[map[string]interface {}]")
+	g.buildError = nil
+	// passthrough post fail
+	err = g.AddPassthroughNode("1", WithStatePostHandler(func(ctx context.Context, in string, state string) (string, error) {
+		return "", nil
+	}))
+	assert.ErrorContains(t, err, "passthrough node[1]'s post handler type isn't any")
+	g.buildError = nil
+	// passthrough post fail with input key
+	err = g.AddPassthroughNode("1", WithStatePostHandler(func(ctx context.Context, in string, state string) (string, error) {
+		return "", nil
+	}), WithInputKey("input"))
+	assert.ErrorContains(t, err, "passthrough node[1]'s post handler type isn't any")
+	g.buildError = nil
+	// passthrough pre success
+	err = g.AddPassthroughNode("1", WithStatePreHandler(func(ctx context.Context, in any, state string) (any, error) {
+		return "", nil
+	}))
+	assert.NoError(t, err)
+	// passthrough pre success with input key
+	err = g.AddPassthroughNode("2", WithStatePreHandler(func(ctx context.Context, in map[string]any, state string) (map[string]any, error) {
+		return nil, nil
+	}), WithInputKey("input"))
+	assert.NoError(t, err)
+	// passthrough post success
+	err = g.AddPassthroughNode("3", WithStatePostHandler(func(ctx context.Context, in any, state string) (any, error) {
+		return "", nil
+	}))
+	assert.NoError(t, err)
+	// passthrough post success with output key
+	err = g.AddPassthroughNode("4", WithStatePostHandler(func(ctx context.Context, in map[string]any, state string) (map[string]any, error) {
+		return nil, nil
+	}), WithOutputKey("output"))
+	assert.NoError(t, err)
+	// common node pre fail
+	err = g.AddLambdaNode("5", InvokableLambda(func(ctx context.Context, input int) (output int, err error) {
+		return 0, nil
+	}), WithStatePreHandler(func(ctx context.Context, in string, state string) (string, error) {
+		return "", nil
+	}))
+	assert.ErrorContains(t, err, "node[5]'s pre handler type[string] is different from its input type[int]")
+	g.buildError = nil
+	// common node post fail
+	err = g.AddLambdaNode("5", InvokableLambda(func(ctx context.Context, input int) (output int, err error) {
+		return 0, nil
+	}), WithStatePostHandler(func(ctx context.Context, in string, state string) (string, error) {
+		return "", nil
+	}))
+	assert.ErrorContains(t, err, "node[5]'s post handler type[string] is different from its output type[int]")
+	g.buildError = nil
+	// common node pre success
+	err = g.AddLambdaNode("5", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		return "", nil
+	}), WithStatePreHandler(func(ctx context.Context, in string, state string) (string, error) {
+		return "", nil
+	}))
+	assert.NoError(t, err)
+	// common node post success
+	err = g.AddLambdaNode("6", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		return "", nil
+	}), WithStatePostHandler(func(ctx context.Context, in string, state string) (string, error) {
+		return "", nil
+	}))
+	assert.NoError(t, err)
+	// pre state fail
+	err = g.AddLambdaNode("7", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		return "", nil
+	}), WithStatePreHandler(func(ctx context.Context, in string, state int) (string, error) {
+		return "", nil
+	}))
+	assert.ErrorContains(t, err, "node[7]'s pre handler state type[int] is different from graph[string]")
+	g.buildError = nil
+	// post state fail
+	err = g.AddLambdaNode("7", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		return "", nil
+	}), WithStatePostHandler(func(ctx context.Context, in string, state int) (string, error) {
+		return "", nil
+	}))
+	assert.ErrorContains(t, err, "node[7]'s post handler state type[int] is different from graph[string]")
+	g.buildError = nil
+	// common pre success with input key
+	err = g.AddLambdaNode("7", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		return "", nil
+	}), WithStatePreHandler(func(ctx context.Context, in map[string]any, state string) (map[string]any, error) {
+		return nil, nil
+	}), WithInputKey("input"))
+	assert.NoError(t, err)
+	// common post success with output key
+	err = g.AddLambdaNode("8", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		return "", nil
+	}), WithStatePostHandler(func(ctx context.Context, in map[string]any, state string) (map[string]any, error) {
+		return nil, nil
+	}), WithOutputKey("output"))
+	assert.NoError(t, err)
+}

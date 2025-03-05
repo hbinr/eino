@@ -26,7 +26,7 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/prompt"
 	"github.com/cloudwego/eino/components/retriever"
-	"github.com/cloudwego/eino/utils/generic"
+	"github.com/cloudwego/eino/internal/generic"
 )
 
 // WorkflowNode is the node of the Workflow.
@@ -52,6 +52,7 @@ func NewWorkflow[I, O any](opts ...NewGraphOption) *Workflow[I, O] {
 		g: newGraphFromGeneric[I, O](
 			ComponentOfWorkflow,
 			options.withState,
+			options.stateType,
 		),
 	}
 
